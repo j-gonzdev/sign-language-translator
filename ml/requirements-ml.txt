@@ -1,0 +1,10 @@
+mediapipe==0.10.33
+opencv-python
+numpy
+pandas
+scikit-learn
+joblib
+matplotlib
+seaborn
+Pillow
+pytest
