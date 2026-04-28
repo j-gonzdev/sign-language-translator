@@ -14,6 +14,7 @@ Uso desde el backend:
         # cerrar sesion live
 """
 
+import mediapipe as mp
 import numpy as np
 import joblib
 import cv2
@@ -44,6 +45,8 @@ _FINGER_BASES = [2, 5, 9, 13, 17]
 
 # Minimo de dedos extendidos por mano para considerar palma abierta
 _MIN_FINGERS_EXTENDED = 4
+
+RunningMode = mp_tasks.vision.RunningMode
 
 # CLASE PRINCIPAL
 
@@ -124,7 +127,7 @@ class ASLPredictor:
         Raises:
             ValueError: Si la imagen tiene un formato inesperado.
         """
-        self._validate_image_image(image)
+        self._validate_image(image)
         
         result = self._detect(image)
         
@@ -162,6 +165,7 @@ class ASLPredictor:
             base_options = mp_tasks.BaseOptions(model_asset_path = task_path)
             options = mp_tasks.vision.HandLandmarkerOptions(
                 base_options = base_options,
+                running_mode = mp_tasks.vision.RunningMode.IMAGE,
                 num_hands = 2,
                 min_hand_detection_confidence = min_detection_confidence,
                 min_hand_presence_confidence = min_detection_confidence,
@@ -183,14 +187,15 @@ class ASLPredictor:
         """
         rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         
-        mp_image = mp_tasks.vision.Image(
-            image_format = mp_tasks.vision.ImageFormat.SRGB,
+        mp_image = mp.Image(
+            image_format = mp.ImageFormat.SRGB,
             data = rgb,
         )
         
         result = self._detector.detect(mp_image)
+        return result
         
-    def _extract_features(result) -> np.ndarray:
+    def _extract_features(self, result) -> np.ndarray:
         """ 
         Extrae el vector de 63 features de la primera mano detectada.
         
