@@ -50,3 +50,5 @@ dist/
 ml/data/raw
 ml/data/processed
 ml/models/*.pkl
+
+guide.txt
