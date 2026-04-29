@@ -38,7 +38,7 @@ class SesionTraduccion(Base):
     )
 
     usuario: Mapped["Usuario"] = relationship(
-        "Usuario", back_populates="sesiones", lazy="selectin",
+        "Usuario", lazy="selectin",
         foreign_keys=[usuario_id]
     )
     archivo: Mapped["Archivo"] = relationship(
