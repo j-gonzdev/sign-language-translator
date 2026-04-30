@@ -26,7 +26,7 @@ class RefreshToken(Base):
     user_agent: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     usuario: Mapped["Usuario"] = relationship(
-        "Usuario", back_populates="refresh_tokens", lazy="selectin"
+        "Usuario", lazy="selectin"
     )
 
 
@@ -44,5 +44,5 @@ class LogActividad(Base):
     ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
 
     usuario: Mapped["Usuario"] = relationship(
-        "Usuario", back_populates="logs", lazy="selectin"
+        "Usuario", lazy="selectin"
     )

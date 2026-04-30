@@ -46,13 +46,3 @@ class Usuario(Base):
     )
 
     rol: Mapped[Rol] = relationship("Rol", back_populates="usuarios", lazy="selectin")
-    refresh_tokens: Mapped[list["RefreshToken"]] = relationship(
-        "RefreshToken", 
-        back_populates="usuario", 
-        lazy="selectin"
-    )
-    logs: Mapped[list["LogActividad"]] = relationship(
-        "LogActividad", 
-        back_populates="usuario", 
-        lazy="selectin"
-    )
