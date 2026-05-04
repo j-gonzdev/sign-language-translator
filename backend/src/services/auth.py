@@ -176,7 +176,7 @@ class AuthService:
         )
 
     async def _find_active_token(self, refresh_token: str,
-                                  usuario_id: int) -> RefreshToken | None:
+                              usuario_id: int) -> RefreshToken | None:
         from sqlalchemy import select
         from src.models.token import RefreshToken as RT
 
@@ -192,7 +192,6 @@ class AuthService:
         for token_obj in tokens:
             if verify_token_hash(refresh_token, token_obj.token_hash):
                 return token_obj
-
         return None
 
     async def _log(self, usuario_id: int, accion: str, request) -> None:

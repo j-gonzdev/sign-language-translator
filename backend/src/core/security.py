@@ -1,5 +1,5 @@
 from datetime import UTC, datetime, timedelta
-
+import hashlib
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 
@@ -31,6 +31,7 @@ def create_access_token(subject: str) -> str:
     }
     return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
+import uuid
 
 def create_refresh_token(subject: str) -> str:
     """
@@ -42,6 +43,7 @@ def create_refresh_token(subject: str) -> str:
         "sub": subject,
         "exp": expire,
         "type": "refresh",
+        "jti": str(uuid.uuid4()),
     }
     return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
@@ -59,8 +61,8 @@ def hash_token(token: str) -> str:
     Hash de un refresh token para almacenamiento seguro en BD.
     Reutiliza el mismo contexto bcrypt que las contraseñas.
     """
-    return pwd_context.hash(token)
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
 def verify_token_hash(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(plain, hashed)
+    return hashlib.sha256(plain.encode()).hexdigest() == hashed
