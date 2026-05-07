@@ -58,7 +58,13 @@ async def get_all_users(
     db: AsyncSession = Depends(get_db),
 ):
     service = UsersService(db)
-    return await service.get_all_users(page=page, limit=limit)
+    result = await service.get_all_users(page=page, limit=limit)
+    return {
+        "items": [UsuarioResponse.model_validate(u) for u in result["items"]],
+        "total": result["total"],
+        "page": result["page"],
+        "limit": result["limit"],
+    }
 
 
 @router.get("/{user_id}", response_model=UsuarioResponse)

@@ -9,9 +9,9 @@ from src.db import Base
 
 
 class UserStatus(str, enum.Enum):
-    ACTIVO = "activo"
-    INACTIVO = "inactivo"
-    BANEADO = "baneado"
+    ACTIVO = "ACTIVO"
+    INACTIVO = "INACTIVO"
+    BANEADO = "BANEADO"
 
 
 class Rol(Base):

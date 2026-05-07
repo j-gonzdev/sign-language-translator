@@ -35,21 +35,21 @@ async def get_current_user(
         raise credentials_exception
 
     repo = UserRepository(db)
-    Usuario = await repo.get_by_id(int(user_id))
+    usuario = await repo.get_by_id(int(user_id))
 
-    if Usuario is None:
+    if usuario is None:
         raise credentials_exception
 
-    if Usuario.status == UserStatus.BANEADO:
+    if usuario.status == UserStatus.BANEADO:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Cuenta suspendida",
         )
 
-    if Usuario.status == UserStatus.INACTIVO:
+    if usuario.status == UserStatus.INACTIVO:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Cuenta inactiva",
         )
 
-    return Usuario
+    return usuario

@@ -19,6 +19,8 @@ from src.schemas.token import TokenResponse
 from fastapi import HTTPException, status
 from jose import JWTError
 
+from src.models.user import UserStatus
+
 settings = get_settings()
 
 
@@ -76,7 +78,7 @@ class AuthService:
         if not usuario or not verify_password(password, usuario.password_hash):
             raise error_generico
 
-        if usuario.status.value != "activo":
+        if usuario.status != UserStatus.ACTIVO:
             raise error_generico
 
         await self.user_repo.update(usuario, fecha_ultimo_acceso=datetime.now(UTC))
@@ -117,7 +119,7 @@ class AuthService:
             raise credentials_exception
 
         usuario = await self.user_repo.get_by_id(usuario_id)
-        if not usuario or usuario.status.value != "activo":
+        if not usuario or usuario.status != UserStatus.ACTIVO:
             raise credentials_exception
 
         token_obj.activo = False
