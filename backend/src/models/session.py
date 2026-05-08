@@ -9,12 +9,15 @@ from src.db import Base
 
 
 class ModoSesion(str, enum.Enum):
-    IMAGEN_SUBIDA = "imagen_subida"
-    FOTO_CAPTURADA = "foto_capturada"
-    VIDEO_SUBIDO = "video_subido"
-    VIDEO_GRABADO = "video_grabado"
-    LIVE_SESSION = "live_session"
-
+    IMAGEN_SUBIDA = "IMAGEN_SUBIDA"
+    FOTO_CAPTURADA = "FOTO_CAPTURADA"
+    VIDEO_SUBIDO = "VIDEO_SUBIDO"
+    VIDEO_GRABADO = "VIDEO_GRABADO"
+    LIVE_SESSION = "LIVE_SESSION"
+    
+class SesionStatus(str, enum.Enum):
+    COMPLETADA = "COMPLETADA"
+    INTERRUMPIDA = "INTERRUMPIDA"
 
 class SesionTraduccion(Base):
     __tablename__ = "sesion_traduccion"
@@ -35,6 +38,12 @@ class SesionTraduccion(Base):
     )
     eliminado_por_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("usuario.id"), nullable=True
+    )
+    
+    status: Mapped[SesionStatus] = mapped_column(
+        Enum(SesionStatus, name="sesionestatus", create_type=False),
+        nullable=False,
+        server_default="COMPLETADA"
     )
 
     usuario: Mapped["Usuario"] = relationship(

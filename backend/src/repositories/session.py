@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models.session import Archivo, ModoSesion, SesionTraduccion
 from src.models.result import Resultado
-
+from datetime import datetime, timezone
 
 class SessionRepository:
 
@@ -55,7 +55,7 @@ class SessionRepository:
     async def soft_delete(self, sesion: SesionTraduccion,
                           eliminado_por_id: int) -> SesionTraduccion:
         sesion.eliminado = True
-        sesion.fecha_eliminacion = datetime.utcnow()
+        sesion.fecha_eliminacion = datetime.now(timezone.utc)
         sesion.eliminado_por_id = eliminado_por_id
         await self.db.flush()
         return sesion
