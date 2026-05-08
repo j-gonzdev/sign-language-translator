@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 from src.models.session import ModoSesion
-
+from src.schemas.session import SesionDetalleResponse
 
 class DetalleResultadoResponse(BaseModel):
     id: int
@@ -31,4 +31,3 @@ class PrediccionDetalleResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
-from src.schemas.session import SesionDetalleResponse

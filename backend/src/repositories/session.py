@@ -1,21 +1,27 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.models.session import Archivo, ModoSesion, SesionTraduccion
+from src.models.session import Archivo, ModoSesion, SesionStatus, SesionTraduccion
 from src.models.result import Resultado
-from datetime import datetime, timezone
+
 
 class SessionRepository:
 
     def __init__(self, db: AsyncSession):
         self.db = db
 
-    async def create_sesion(self, usuario_id: int, modo: ModoSesion) -> SesionTraduccion:
+    async def create_sesion(
+        self,
+        usuario_id: int,
+        modo: ModoSesion,
+        status: SesionStatus = SesionStatus.COMPLETADA,
+    ) -> SesionTraduccion:
         sesion = SesionTraduccion(
             usuario_id=usuario_id,
             modo=modo,
+            status=status,
             eliminado=False,
         )
         self.db.add(sesion)
@@ -57,6 +63,15 @@ class SessionRepository:
         sesion.eliminado = True
         sesion.fecha_eliminacion = datetime.now(timezone.utc)
         sesion.eliminado_por_id = eliminado_por_id
+        await self.db.flush()
+        return sesion
+
+    async def update_status(
+        self,
+        sesion: SesionTraduccion,
+        status: SesionStatus,
+    ) -> SesionTraduccion:
+        sesion.status = status
         await self.db.flush()
         return sesion
 

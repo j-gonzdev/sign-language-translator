@@ -19,8 +19,12 @@ settings = get_settings()
 async def lifespan(app: FastAPI):
     """Ejecuta setup al arrancar y cleanup al apagar."""
     setup_logging()
+    from src.services.predictions import get_predictor
+    from src.services.storage import get_supabase_client
+    client = get_supabase_client()
+    client.storage.from_(settings.SUPABASE_BUCKET).list()  # calentamiento
+    get_predictor()
     yield
-    # Aquí irá el cierre del engine cuando implementes shutdown
 
 
 # Instancia FastAPI

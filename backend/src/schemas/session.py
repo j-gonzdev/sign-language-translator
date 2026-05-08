@@ -1,12 +1,12 @@
 from datetime import datetime
 from pydantic import BaseModel
-from src.models.session import ModoSesion
-
+from src.models.session import ModoSesion, SesionStatus
 
 class SesionResponse(BaseModel):
     id: int
     usuario_id: int
     modo: ModoSesion
+    status: SesionStatus  # añadir
     fecha: datetime
     eliminado: bool
 

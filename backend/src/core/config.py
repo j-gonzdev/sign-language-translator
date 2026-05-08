@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     
     # Administración
     ADMIN_SECRET: str
+    
+    MODEL_PATH: str = "ml/models/asl_model.pkl"
+    TASK_PATH: str = "ml/hand_landmarker.task"
 
     # Propiedades calculadas
     @property
