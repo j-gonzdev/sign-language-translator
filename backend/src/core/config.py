@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     
     MODEL_PATH: str = "ml/models/asl_model.pkl"
     TASK_PATH: str = "ml/hand_landmarker.task"
+    VIDEO_FPS_SAMPLE: int = 6
+    VIDEO_MAX_DURATION: int = 180
 
     # Propiedades calculadas
     @property

@@ -1,5 +1,5 @@
 # src/routers/predictions.py
-from fastapi import APIRouter, Depends, Form, UploadFile, File
+from fastapi import APIRouter, Depends, Form, UploadFile, File, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db import get_db
@@ -10,9 +10,8 @@ from src.repositories.session import SessionRepository
 from src.services.predictions import PredictionsService
 from src.services.storage import StorageService
 
-from fastapi import HTTPException
-
 router = APIRouter()
+
 
 @router.post("/image")
 async def predict_image(
@@ -23,6 +22,17 @@ async def predict_image(
 ):
     service = PredictionsService(db=db, usuario=usuario)
     return await service.predict_image(archivo=archivo, modo=modo)
+
+
+@router.post("/video")
+async def predict_video(
+    archivo: UploadFile = File(...),
+    modo: ModoSesion = Form(...),
+    db: AsyncSession = Depends(get_db),
+    usuario: Usuario = Depends(get_current_user),
+):
+    service = PredictionsService(db=db, usuario=usuario)
+    return await service.predict_video(archivo=archivo, modo=modo)
 
 
 @router.get("/files/{sesion_id}")

@@ -1,4 +1,3 @@
-import io
 import cv2
 import numpy as np
 from fastapi import HTTPException, UploadFile
@@ -14,11 +13,13 @@ from src.schemas.session import SesionResponse
 
 settings = get_settings()
 
-# Modos válidos para el endpoint de imagen
+# Modos válidos por endpoint
 _MODOS_IMAGEN = {ModoSesion.IMAGEN_SUBIDA, ModoSesion.FOTO_CAPTURADA}
+_MODOS_VIDEO = {ModoSesion.VIDEO_SUBIDO, ModoSesion.VIDEO_GRABADO}
 
 # Singleton del predictor — se carga una vez al importar el módulo
 _predictor = None
+
 
 def get_predictor():
     global _predictor
@@ -66,13 +67,20 @@ class PredictionsService:
         )
 
         # Subir a Storage
-        ruta_storage = await self.storage.upload_file(
-            usuario_id=self.usuario.id,
-            sesion_id=sesion.id,
-            nombre_original=archivo.filename or "imagen.jpg",
-            contenido=contenido,
-            content_type=archivo.content_type or "image/jpeg",
-        )
+        try:
+            ruta_storage = await self.storage.upload_file(
+                usuario_id=self.usuario.id,
+                sesion_id=sesion.id,
+                nombre_original=archivo.filename or "imagen.jpg",
+                contenido=contenido,
+                content_type=archivo.content_type or "image/jpeg",
+            )
+        except Exception as e:
+            await self.db.rollback()
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error al subir el archivo: {str(e)}"
+            )
 
         # Registrar archivo en BD
         await self.session_repo.create_archivo(
@@ -113,6 +121,110 @@ class PredictionsService:
                     "posicion_secuencia": 0,
                     "timestamp_frame": None,
                 }]
+            )
+
+        await self.db.commit()
+
+        return {
+            "sesion": SesionResponse.model_validate(sesion),
+            "resultado": ResultadoResponse(
+                id=resultado.id,
+                sesion_id=resultado.sesion_id,
+                secuencia_texto=resultado.secuencia_texto,
+                confianza_media=resultado.confianza_media,
+                total_frames=resultado.total_frames,
+                detalles=[
+                    DetalleResultadoResponse.model_validate(d)
+                    for d in detalles
+                ],
+            ),
+        }
+
+    async def predict_video(
+        self,
+        archivo: UploadFile,
+        modo: ModoSesion,
+    ) -> dict:
+        # Validar modo
+        if modo not in _MODOS_VIDEO:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Modo inválido para este endpoint. Usa: {[m.value for m in _MODOS_VIDEO]}"
+            )
+
+        # Leer contenido del archivo
+        contenido = await archivo.read()
+
+        # Validar vídeo y extraer frames — 422 si corrupto o supera duración máxima
+        # Ocurre antes de crear sesión en BD: sin efectos secundarios si falla
+        from src.services.video import VideoService
+        frames = VideoService.validate_and_extract_frames(
+            contenido=contenido,
+            nombre_original=archivo.filename or "video.mp4",
+        )
+
+        # Crear sesión en BD
+        sesion = await self.session_repo.create_sesion(
+            usuario_id=self.usuario.id,
+            modo=modo,
+            status=SesionStatus.COMPLETADA,
+        )
+
+        # Ejecutar ML sobre cada frame
+        try:
+            predictor = get_predictor()
+            predicciones = []
+            for frame in frames:
+                gesto, confianza = predictor.predict(frame)
+                predicciones.append((gesto, confianza))
+        except Exception as e:
+            await self.session_repo.update_status(sesion, SesionStatus.INTERRUMPIDA)
+            await self.db.commit()
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error en el modelo ML: {str(e)}"
+            )
+
+        # Deduplicación de consecutivos y construcción de secuencia
+        # nothing resetea el último gesto — permite detectar A→nothing→A como dos gestos
+        detalles_data = []
+        ultimo_gesto = None
+        posicion = 0
+
+        for frame_idx, (gesto, confianza) in enumerate(predicciones):
+            if gesto == "nothing":
+                ultimo_gesto = None
+                continue
+            if gesto == ultimo_gesto:
+                continue
+            ultimo_gesto = gesto
+            detalles_data.append({
+                "gesto": gesto,
+                "confianza": confianza,
+                "posicion_secuencia": posicion,
+                "timestamp_frame": round(frame_idx / settings.VIDEO_FPS_SAMPLE, 2),
+            })
+            posicion += 1
+
+        secuencia_texto = "".join(d["gesto"] for d in detalles_data)
+        confianza_media = (
+            sum(d["confianza"] for d in detalles_data) / len(detalles_data)
+            if detalles_data else 0.0
+        )
+
+        # Guardar resultado
+        resultado = await self.result_repo.create_resultado(
+            sesion_id=sesion.id,
+            secuencia_texto=secuencia_texto,
+            confianza_media=confianza_media,
+            total_frames=len(frames),
+        )
+
+        detalles = []
+        if detalles_data:
+            detalles = await self.result_repo.create_detalles(
+                resultado_id=resultado.id,
+                detalles=detalles_data,
             )
 
         await self.db.commit()
