@@ -1,5 +1,5 @@
 # src/routers/predictions.py
-from fastapi import APIRouter, Depends, Form, UploadFile, File, HTTPException
+from fastapi import APIRouter, Depends, Form, UploadFile, File, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db import get_db
@@ -34,6 +34,15 @@ async def predict_video(
     service = PredictionsService(db=db, usuario=usuario)
     return await service.predict_video(archivo=archivo, modo=modo)
 
+@router.get("")
+async def get_history(
+    page: int = 1,
+    limit: int = 20,
+    db: AsyncSession = Depends(get_db),
+    usuario: Usuario = Depends(get_current_user),
+):
+    service = PredictionsService(db=db, usuario=usuario)
+    return await service.get_history(page=page, limit=limit)
 
 @router.get("/files/{sesion_id}")
 async def get_signed_url(
@@ -59,3 +68,21 @@ async def get_signed_url(
     storage = StorageService()
     url = await storage.get_signed_url(sesion.archivo.ruta_storage)
     return {"url": url}
+
+@router.get("/{sesion_id}")
+async def get_prediction_detail(
+    sesion_id: int,
+    db: AsyncSession = Depends(get_db),
+    usuario: Usuario = Depends(get_current_user),
+):
+    service = PredictionsService(db=db, usuario=usuario)
+    return await service.get_prediction_detail(sesion_id=sesion_id)
+
+@router.delete("/{sesion_id}")
+async def delete_prediction(
+    sesion_id: int,
+    db: AsyncSession = Depends(get_db),
+    usuario: Usuario = Depends(get_current_user),
+):
+    service = PredictionsService(db=db, usuario=usuario)
+    return await service.delete_prediction(sesion_id=sesion_id)
