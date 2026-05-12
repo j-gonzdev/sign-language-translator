@@ -36,3 +36,5 @@ httpx>=0.26,<0.28
 pydantic[email]
 
 bcrypt==4.0.1
+
+httpx-ws>=0.9,<1.0

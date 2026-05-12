@@ -1,12 +1,17 @@
 import cv2
 import numpy as np
-from fastapi import HTTPException, UploadFile
+import asyncio
+import base64
+from jose import JWTError
+from fastapi import HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 
 from src.core.config import get_settings
+from src.core.security import decode_token
 from src.models.session import ModoSesion, SesionStatus
-from src.models.user import Usuario
+from src.models.user import Usuario, UserStatus
 from src.repositories.session import SessionRepository
 from src.repositories.result import ResultRepository
+from src.repositories.user import UserRepository
 from src.services.storage import StorageService
 from src.schemas.result import ResultadoResponse, DetalleResultadoResponse
 from src.schemas.session import SesionResponse, SesionDetalleResponse
@@ -326,3 +331,288 @@ class PredictionsService:
                 detail="El archivo no es una imagen válida o está corrupto."
             )
         return imagen
+    
+    
+WS_CLOSE_AUTH_ERROR   = 4001  # JWT ausente, expirado, inválido, o usuario no autorizado
+WS_CLOSE_TIMEOUT      = 4002  # Límite de 180 s alcanzado — sesión COMPLETADA
+WS_CLOSE_STOP_GESTURE = 4003  # Gesto de parada detectado — sesión COMPLETADA
+WS_CLOSE_ML_ERROR     = 4004  # Excepción en modelo ML — sesión INTERRUMPIDA
+    
+    
+class _StopGestureSignal(Exception):
+    """Lanzada desde _live_loop cuando se detectan dos palmas abiertas."""
+ 
+class _MLErrorSignal(Exception):
+    """Lanzada desde _live_loop cuando el modelo ML lanza una excepción."""
+
+async def predict_live(websocket: WebSocket, db) -> None:
+    """
+    Gestiona una sesión de traducción ASL en tiempo real via WebSocket.
+ 
+    PROTOCOLO CLIENTE → SERVIDOR
+    ─────────────────────────────────────────────────────────────────────
+    Paso 1 — Autenticación (cliente envía nada más conectar):
+        { "type": "auth", "token": "<access_jwt>" }
+ 
+    Paso 2 — Confirmación del servidor:
+        { "type": "auth_ok", "sesion_id": <int> }
+        Si el token es inválido: cierre con código 4001.
+ 
+    Paso 3 — El cliente envía frames a ~6 FPS:
+        { "type": "frame", "data": "<base64_jpeg>" }
+ 
+        Cómo capturar en Angular:
+            const canvas = document.createElement('canvas');
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            canvas.getContext('2d').drawImage(video, 0, 0);
+            const data = canvas.toDataURL('image/jpeg', 0.7).split(',')[1];
+            ws.send(JSON.stringify({ type: 'frame', data }));
+        Intervalo recomendado: setInterval(..., 150)  // ~6-7 FPS
+ 
+    Paso 4 — El servidor responde por cada frame:
+        { "type": "prediction", "gesto": "A", "confianza": 0.97, "secuencia": "HLA" }
+        Si no hay mano: gesto = "nothing", confianza = 0.0
+ 
+    CIERRES
+    ─────────────────────────────────────────────────────────────────────
+    4001  Token inválido / usuario baneado o inactivo   → sin sesión en BD
+    4002  Timeout de 180 s                              → sesión COMPLETADA
+    4003  Gesto de parada (dos palmas abiertas)         → sesión COMPLETADA
+    4004  Excepción en modelo ML                        → sesión INTERRUMPIDA
+    sin código  Desconexión abrupta del cliente         → sesión INTERRUMPIDA
+ 
+    Args:
+        websocket:  Instancia WebSocket de FastAPI (NO aceptada todavía).
+        db:         AsyncSession de SQLAlchemy inyectada por FastAPI.
+    """
+    await websocket.accept()
+ 
+    # ── 1. AUTENTICACIÓN ──────────────────────────────────────────────────────
+    usuario = await _authenticate_websocket(websocket, db)
+    if usuario is None:
+        return  # ya cerró con 4001
+ 
+    # ── 2. CREAR SESIÓN EN BD ─────────────────────────────────────────────────
+    session_repo = SessionRepository(db)
+    result_repo  = ResultRepository(db)
+ 
+    sesion = await session_repo.create_sesion(
+        usuario_id=usuario.id,
+        modo=ModoSesion.LIVE_SESSION,
+        status=SesionStatus.COMPLETADA,  # optimista; se sobrescribe si hay error
+    )
+    await db.commit()
+ 
+    await websocket.send_json({
+        "type": "auth_ok",
+        "sesion_id": sesion.id,
+    })
+ 
+    # ── 3. ESTADO COMPARTIDO DEL BUCLE ────────────────────────────────────────
+    # Usamos un dict mutable para que _live_loop pueda modificar el estado
+    # sin necesitar nonlocal (asyncio.wait_for cancela la coroutine y nonlocal
+    # no sobrevive a la cancelación de forma fiable entre implementaciones).
+    state = {
+        "ultimo_gesto": None,
+        "detalles_data": [],
+        "frames_procesados": 0,
+    }
+ 
+    # ── 4. BUCLE PRINCIPAL CON TIMEOUT ────────────────────────────────────────
+    predictor = get_predictor()
+    cierre_controlado = False
+ 
+    try:
+        await asyncio.wait_for(
+            _live_loop(websocket=websocket, predictor=predictor, state=state),
+            timeout=float(settings.VIDEO_MAX_DURATION),
+        )
+        # _live_loop solo termina "normalmente" si el iterador de mensajes
+        # se agota (el cliente cerró limpiamente) — lo tratamos como INTERRUMPIDA
+        # porque el usuario no usó el gesto de parada ni esperó el timeout.
+        cierre_controlado = False
+ 
+    except asyncio.TimeoutError:
+        cierre_controlado = True
+        await _safe_close(websocket, WS_CLOSE_TIMEOUT)
+ 
+    except _StopGestureSignal:
+        cierre_controlado = True
+        await _safe_close(websocket, WS_CLOSE_STOP_GESTURE)
+ 
+    except _MLErrorSignal:
+        await session_repo.update_status(sesion, SesionStatus.INTERRUMPIDA)
+        await db.commit()
+        await _safe_close(websocket, WS_CLOSE_ML_ERROR)
+        return
+ 
+    except WebSocketDisconnect:
+        cierre_controlado = False  # desconexión abrupta
+ 
+    except Exception:
+        await session_repo.update_status(sesion, SesionStatus.INTERRUMPIDA)
+        await db.commit()
+        return
+ 
+    # ── 5. GUARDAR RESULTADO ──────────────────────────────────────────────────
+    if not cierre_controlado:
+        await session_repo.update_status(sesion, SesionStatus.INTERRUMPIDA)
+        await db.commit()
+        return
+ 
+    detalles_data = state["detalles_data"]
+    secuencia_texto = "".join(d["gesto"] for d in detalles_data)
+    confianza_media = (
+        sum(d["confianza"] for d in detalles_data) / len(detalles_data)
+        if detalles_data else 0.0
+    )
+ 
+    resultado = await result_repo.create_resultado(
+        sesion_id=sesion.id,
+        secuencia_texto=secuencia_texto,
+        confianza_media=confianza_media,
+        total_frames=state["frames_procesados"],
+    )
+ 
+    if detalles_data:
+        await result_repo.create_detalles(
+            resultado_id=resultado.id,
+            detalles=detalles_data,
+        )
+ 
+    await db.commit()
+
+async def _live_loop(websocket: WebSocket, predictor, state: dict) -> None:
+    """
+    Recibe frames JSON del cliente en bucle, ejecuta ML y devuelve predicciones.
+ 
+    El estado de deduplicación vive en `state` (dict mutable) para que
+    predict_live() pueda leerlo después de que asyncio.wait_for lo cancele.
+ 
+    Lanza:
+        _StopGestureSignal   al detectar dos palmas abiertas
+        _MLErrorSignal       si el modelo ML lanza una excepción no esperada
+        WebSocketDisconnect  si el cliente se desconecta
+    """
+    async for message in websocket.iter_json():
+        if message.get("type") != "frame":
+            continue  # ignorar mensajes de control desconocidos
+ 
+        frame = _decode_frame(message.get("data", ""))
+        if frame is None:
+            await websocket.send_json({
+                "type": "error",
+                "detail": "Frame inválido o corrupto, se ignora.",
+            })
+            continue
+ 
+        state["frames_procesados"] += 1
+ 
+        # ML — is_stop_gesture primero para no inferir gesto en el frame de parada
+        try:
+            if predictor.is_stop_gesture(frame):
+                raise _StopGestureSignal()
+            gesto, confianza = predictor.predict(frame)
+        except (_StopGestureSignal, _MLErrorSignal):
+            raise
+        except Exception as e:
+            raise _MLErrorSignal(str(e)) from e
+ 
+        # Deduplicación — algoritmo idéntico a predict_video
+        if gesto == "nothing":
+            state["ultimo_gesto"] = None
+        elif gesto != state["ultimo_gesto"]:
+            state["ultimo_gesto"] = gesto
+            state["detalles_data"].append({
+                "gesto": gesto,
+                "confianza": confianza,
+                "posicion_secuencia": len(state["detalles_data"]),
+                "timestamp_frame": None,  # live no tiene timestamp de vídeo
+            })
+ 
+        secuencia_actual = "".join(d["gesto"] for d in state["detalles_data"])
+        await websocket.send_json({
+            "type": "prediction",
+            "gesto": gesto,
+            "confianza": round(confianza, 4),
+            "secuencia": secuencia_actual,
+        })
+        
+async def _authenticate_websocket(websocket: WebSocket, db) -> "Usuario | None":
+    """
+    Valida el JWT enviado en el primer mensaje del WebSocket.
+ 
+    No reutiliza get_current_user() de FastAPI porque esa dependency
+    lee el header Authorization (HTTP Bearer), que no existe en WebSocket.
+    Aquí el JWT viaja en el cuerpo del primer mensaje del protocolo.
+ 
+    Devuelve el objeto Usuario si es válido, None si no (ya cerró el WS).
+    Timeout de 10 s para el primer mensaje — evita conexiones fantasma.
+    """
+    try:
+        message = await asyncio.wait_for(
+            websocket.receive_json(),
+            timeout=10.0,
+        )
+    except (asyncio.TimeoutError, Exception):
+        await _safe_close(websocket, WS_CLOSE_AUTH_ERROR)
+        return None
+ 
+    if message.get("type") != "auth":
+        await _safe_close(websocket, WS_CLOSE_AUTH_ERROR)
+        return None
+ 
+    token = message.get("token", "")
+    try:
+        payload = decode_token(token)
+        if payload.get("type") != "access":
+            raise JWTError("tipo de token incorrecto")
+        user_id = payload.get("sub")
+        if not user_id:
+            raise JWTError("sub ausente")
+    except JWTError:
+        await _safe_close(websocket, WS_CLOSE_AUTH_ERROR)
+        return None
+ 
+    repo = UserRepository(db)
+    usuario = await repo.get_by_id(int(user_id))
+ 
+    if usuario is None:
+        await _safe_close(websocket, WS_CLOSE_AUTH_ERROR)
+        return None
+ 
+    if usuario.status in (UserStatus.BANEADO, UserStatus.INACTIVO):
+        await _safe_close(websocket, WS_CLOSE_AUTH_ERROR)
+        return None
+ 
+    return usuario
+ 
+ 
+def _decode_frame(data: str) -> "np.ndarray | None":
+    """
+    Convierte un string base64 JPEG en un array numpy BGR (uint8).
+ 
+    Devuelve None si el string está vacío, es base64 inválido,
+    o los bytes resultantes no son decodificables por OpenCV.
+    """
+    if not data:
+        return None
+    try:
+        raw   = base64.b64decode(data)
+        arr   = np.frombuffer(raw, dtype=np.uint8)
+        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        return frame  # puede ser None si OpenCV no reconoce el formato
+    except Exception:
+        return None
+ 
+ 
+async def _safe_close(websocket: WebSocket, code: int) -> None:
+    """
+    Cierra el WebSocket ignorando errores si la conexión ya está cerrada.
+    Necesario porque WebSocketDisconnect puede haber llegado justo antes.
+    """
+    try:
+        await websocket.close(code=code)
+    except Exception:
+        pass

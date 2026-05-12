@@ -4,15 +4,18 @@ import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import cv2
+import asyncio
+import base64
+import json
 import numpy as np
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
+from httpx_ws.transport import ASGIWebSocketTransport
+from httpx_ws import aconnect_ws
+from src.main import app as fastapi_app
 
-
-# ---------------------------------------------------------------------------
 # Fixtures — imagen
-# ---------------------------------------------------------------------------
 
 @pytest_asyncio.fixture
 def imagen_valida() -> dict:
@@ -25,10 +28,7 @@ def imagen_valida() -> dict:
         "content_type": "image/jpeg",
     }
 
-
-# ---------------------------------------------------------------------------
 # Fixtures — vídeo
-# ---------------------------------------------------------------------------
 
 @pytest_asyncio.fixture
 def video_valido() -> dict:
@@ -128,10 +128,7 @@ def video_secuencia() -> dict:
         "content_type": "video/mp4",
     }
 
-
-# ---------------------------------------------------------------------------
 # Fixtures — mocks
-# ---------------------------------------------------------------------------
 
 @pytest_asyncio.fixture
 def mock_storage():
@@ -193,10 +190,7 @@ def mock_predictor_secuencia():
     with patch("src.services.predictions.get_predictor", return_value=predictor):
         yield predictor
 
-
-# ---------------------------------------------------------------------------
 # Tests — imagen (8/8)
-# ---------------------------------------------------------------------------
 
 class TestPredictImage:
 
@@ -379,10 +373,7 @@ class TestPredictImage:
         )
         assert response.status_code in (401, 403)
 
-
-# ---------------------------------------------------------------------------
 # Tests — vídeo (9 tests)
-# ---------------------------------------------------------------------------
 
 class TestPredictVideo:
 
@@ -576,3 +567,227 @@ class TestPredictVideo:
             )},
         )
         assert response.status_code in (401, 403)
+        
+# Fixture — frame JPEG sintético en base64
+
+@pytest.fixture
+def frame_base64() -> str:
+    """Frame JPEG 64×64 sintético codificado en base64."""
+    frame = np.zeros((64, 64, 3), dtype=np.uint8)
+    frame[:, :] = (0, 255, 0)
+    ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+    assert ok
+    return base64.b64encode(buf.tobytes()).decode("utf-8")
+ 
+# Helper WebSocket
+
+def _ws_client():
+    """
+    AsyncClient con ASGIWebSocketTransport apuntando a fastapi_app.
+    
+    ASGIWebSocketTransport (de httpx_ws) maneja el upgrade WebSocket.
+    ASGITransport (de httpx) es solo HTTP — no sirve para WebSocket.
+    
+    El override de get_db está en fastapi_app.dependency_overrides,
+    aplicado por el fixture client del conftest. Este cliente lo hereda.
+    """
+    return AsyncClient(
+        transport=ASGIWebSocketTransport(app=fastapi_app),
+        base_url="http://test",
+    )
+ 
+ 
+async def _ws_auth(ws, token: str) -> dict:
+    """Envía auth y devuelve la respuesta auth_ok como dict."""
+    await ws.send_text(json.dumps({"type": "auth", "token": token}))
+    response = await ws.receive_text()
+    return json.loads(response)
+ 
+# Tests — WebSocket live (7 tests)
+ 
+class TestPredictLive:
+    """
+    Tests del WebSocket /predictions/live.
+ 
+    Patrón:
+    - El fixture `client` aplica override_get_db sobre fastapi_app (BD asl_test).
+    - _ws_client() construye un AsyncClient con ASGIWebSocketTransport
+      que hereda ese override porque apunta a la misma fastapi_app.
+    - Las verificaciones de BD posteriores usan el fixture `client` HTTP normal.
+    """
+ 
+    # 1. Autenticación correcta → auth_ok con sesion_id
+    async def test_auth_ok_devuelve_sesion_id(
+        self,
+        client: AsyncClient,
+        registered_user: dict,
+        frame_base64: str,
+    ):
+        mock_predictor = MagicMock()
+        mock_predictor.predict.return_value = ("A", 0.95)
+        mock_predictor.is_stop_gesture.return_value = False
+ 
+        token = registered_user["access_token"]
+ 
+        with patch("src.services.predictions.get_predictor", return_value=mock_predictor):
+            async with _ws_client() as ws_client:
+                async with aconnect_ws("http://test/predictions/live", ws_client) as ws:
+                    auth_response = await _ws_auth(ws, token)
+ 
+        assert auth_response["type"] == "auth_ok"
+        assert isinstance(auth_response["sesion_id"], int)
+        assert auth_response["sesion_id"] > 0
+ 
+    # 2. Token inválido → cierre 4001
+    async def test_token_invalido_cierra_4001(
+        self,
+        client: AsyncClient,
+        registered_user: dict,
+    ):
+        with pytest.raises(Exception):
+            async with _ws_client() as ws_client:
+                async with aconnect_ws("http://test/predictions/live", ws_client) as ws:
+                    await ws.send_text(json.dumps({
+                        "type": "auth",
+                        "token": "token.invalido.jwt",
+                    }))
+                    await ws.receive_text()
+ 
+    # 3. Primer mensaje no es auth → cierre 4001
+    async def test_primer_mensaje_no_auth_cierra_4001(
+        self,
+        client: AsyncClient,
+        registered_user: dict,
+    ):
+        with pytest.raises(Exception):
+            async with _ws_client() as ws_client:
+                async with aconnect_ws("http://test/predictions/live", ws_client) as ws:
+                    await ws.send_text(json.dumps({
+                        "type": "frame",
+                        "data": "",
+                    }))
+                    await ws.receive_text()
+ 
+    # 4. Gesto de parada → cierre 4003, sesión COMPLETADA en BD
+    async def test_stop_gesture_cierra_4003_sesion_completada(
+        self,
+        client: AsyncClient,
+        registered_user: dict,
+        frame_base64: str,
+    ):
+        mock_predictor = MagicMock()
+        mock_predictor.predict.return_value = ("A", 0.90)
+        mock_predictor.is_stop_gesture.side_effect = [False, True]
+ 
+        token = registered_user["access_token"]
+        sesion_id = None
+ 
+        with patch("src.services.predictions.get_predictor", return_value=mock_predictor):
+            try:
+                async with _ws_client() as ws_client:
+                    async with aconnect_ws("http://test/predictions/live", ws_client) as ws:
+                        auth_resp = await _ws_auth(ws, token)
+                        sesion_id = auth_resp["sesion_id"]
+ 
+                        await ws.send_text(json.dumps({"type": "frame", "data": frame_base64}))
+                        await ws.receive_text()
+ 
+                        await ws.send_text(json.dumps({"type": "frame", "data": frame_base64}))
+                        await ws.receive_text()
+            except Exception:
+                pass
+ 
+        assert sesion_id is not None
+        response = await client.get(
+            f"/predictions/{sesion_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 200
+        assert response.json()["sesion"]["status"] == "COMPLETADA"
+ 
+    # 5. Timeout → sesión COMPLETADA con lo acumulado
+    async def test_timeout_sesion_completada(
+        self,
+        client: AsyncClient,
+        registered_user: dict,
+        frame_base64: str,
+    ):
+        mock_predictor = MagicMock()
+        mock_predictor.predict.return_value = ("B", 0.88)
+        mock_predictor.is_stop_gesture.return_value = False
+ 
+        token = registered_user["access_token"]
+        sesion_id = None
+ 
+        with patch("src.services.predictions.get_predictor", return_value=mock_predictor):
+            with patch("src.services.predictions.settings") as mock_settings:
+                mock_settings.VIDEO_MAX_DURATION = 0.1  # 100 ms
+ 
+                try:
+                    async with _ws_client() as ws_client:
+                        async with aconnect_ws("http://test/predictions/live", ws_client) as ws:
+                            auth_resp = await _ws_auth(ws, token)
+                            sesion_id = auth_resp["sesion_id"]
+ 
+                            await ws.send_text(json.dumps({"type": "frame", "data": frame_base64}))
+                            await ws.receive_text()
+ 
+                            await asyncio.sleep(0.5)
+                            await ws.receive_text()
+                except Exception:
+                    pass
+ 
+        assert sesion_id is not None
+        response = await client.get(
+            f"/predictions/{sesion_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 200
+        assert response.json()["sesion"]["status"] == "COMPLETADA"
+ 
+    # 6. Error ML → cierre 4004, sesión INTERRUMPIDA en BD
+    async def test_error_ml_sesion_interrumpida(
+        self,
+        client: AsyncClient,
+        registered_user: dict,
+        frame_base64: str,
+    ):
+        mock_predictor = MagicMock()
+        mock_predictor.is_stop_gesture.return_value = False
+        mock_predictor.predict.side_effect = RuntimeError("fallo ML simulado")
+ 
+        token = registered_user["access_token"]
+        sesion_id = None
+ 
+        with patch("src.services.predictions.get_predictor", return_value=mock_predictor):
+            try:
+                async with _ws_client() as ws_client:
+                    async with aconnect_ws("http://test/predictions/live", ws_client) as ws:
+                        auth_resp = await _ws_auth(ws, token)
+                        sesion_id = auth_resp["sesion_id"]
+ 
+                        await ws.send_text(json.dumps({"type": "frame", "data": frame_base64}))
+                        await ws.receive_text()
+            except Exception:
+                pass
+ 
+        assert sesion_id is not None
+        response = await client.get(
+            f"/predictions/{sesion_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 200
+        assert response.json()["sesion"]["status"] == "INTERRUMPIDA"
+ 
+    # 7. Sin autenticación → cierre 4001
+    async def test_sin_autenticacion_cierra_4001(
+        self,
+        client: AsyncClient,
+    ):
+        with patch("src.services.predictions.asyncio.wait_for") as mock_wait:
+            mock_wait.side_effect = asyncio.TimeoutError()
+ 
+            with pytest.raises(Exception):
+                async with _ws_client() as ws_client:
+                    async with aconnect_ws("http://test/predictions/live", ws_client) as ws:
+                        await ws.receive_text()

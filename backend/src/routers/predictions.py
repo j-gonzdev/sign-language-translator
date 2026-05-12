@@ -1,5 +1,5 @@
 # src/routers/predictions.py
-from fastapi import APIRouter, Depends, Form, UploadFile, File, HTTPException, Query
+from fastapi import APIRouter, Depends, Form, UploadFile, File, HTTPException, Query, WebSocket
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db import get_db
@@ -7,7 +7,7 @@ from src.dependencies.auth import get_current_user
 from src.models.session import ModoSesion
 from src.models.user import Usuario
 from src.repositories.session import SessionRepository
-from src.services.predictions import PredictionsService
+from src.services.predictions import PredictionsService, predict_live
 from src.services.storage import StorageService
 
 router = APIRouter()
@@ -33,6 +33,22 @@ async def predict_video(
 ):
     service = PredictionsService(db=db, usuario=usuario)
     return await service.predict_video(archivo=archivo, modo=modo)
+
+@router.websocket("/live")
+async def predictions_live(
+    websocket: WebSocket,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    WebSocket para traducción ASL en tiempo real.
+ 
+    La autenticación NO usa el header Authorization — el JWT viaja en el
+    primer mensaje JSON tras establecer la conexión:
+        { "type": "auth", "token": "<access_jwt>" }
+ 
+    Ver predict_live() en services/predictions.py para el protocolo completo.
+    """
+    await predict_live(websocket=websocket, db=db)
 
 @router.get("")
 async def get_history(
