@@ -4,6 +4,7 @@
 
 ml/models/*
 !ml/models/.gitkeep
+!ml/models/asl_model.pkl
 
 ml/data/**
 ml/data/.gitkeep
@@ -49,6 +50,5 @@ dist/
 
 ml/data/raw
 ml/data/processed
-ml/models/*.pkl
 
 guide.txt
