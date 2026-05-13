@@ -1,0 +1,67 @@
+# backend/Dockerfile
+
+# ── Imagen base ───────────────────────────────────────────────────────────────
+# Python 3.12-slim: imagen oficial mínima, sin herramientas de desarrollo.
+# No usamos alpine: asyncpg necesita compilar extensiones C y alpine
+# requiere mucha configuración adicional para eso.
+FROM python:3.12-slim
+
+# ── Variables de entorno del sistema ─────────────────────────────────────────
+# PYTHONDONTWRITEBYTECODE: evita generar archivos .pyc en la imagen
+# PYTHONUNBUFFERED: los logs aparecen en Railway en tiempo real sin buffering
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# ── Directorio de trabajo ─────────────────────────────────────────────────────
+# /app es la raíz del proyecto dentro del contenedor.
+# Refleja la estructura local: /app/backend/ y /app/ml/ al mismo nivel.
+WORKDIR /app
+
+# ── Dependencias del sistema ──────────────────────────────────────────────────
+# libgl1 y libglib2.0-0: requeridos por OpenCV (cv2) en entornos headless
+# libmagic1: requerido por python-magic para validación MIME
+# build-essential: compilador C para asyncpg y otras extensiones nativas
+# git: requerido por Railway para clonar el repo con Git LFS
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 \
+    libglib2.0-0 \
+    libmagic1 \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Dependencias Python ───────────────────────────────────────────────────────
+# Se copian los requirements antes que el código fuente para aprovechar
+# la caché de capas de Docker: si el código cambia pero los requirements no,
+# Docker no reinstala las dependencias.
+COPY requirements-backend.txt .
+COPY requirements-ml.txt .
+
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements-backend.txt && \
+    pip install --no-cache-dir -r requirements-ml.txt
+
+# ── Código fuente ─────────────────────────────────────────────────────────────
+# Se copia después de instalar dependencias (optimización de caché).
+# Estructura dentro del contenedor:
+#   /app/backend/   → código FastAPI
+#   /app/ml/        → modelo e inferencia
+COPY backend/ ./backend/
+COPY ml/ ./ml/
+
+# ── PYTHONPATH ────────────────────────────────────────────────────────────────
+# Equivalente al `set PYTHONPATH=backend` del arranque local.
+# Permite que `src.*` y `ml.*` se importen sin prefijo desde cualquier módulo.
+ENV PYTHONPATH=/app/backend
+
+# ── Puerto ────────────────────────────────────────────────────────────────────
+# Railway inyecta $PORT en runtime. Uvicorn lo lee via la variable de entorno.
+# EXPOSE es documentación — no abre el puerto, Railway lo gestiona.
+EXPOSE 8000
+
+# ── Arranque ──────────────────────────────────────────────────────────────────
+# --host 0.0.0.0: necesario en contenedor para aceptar conexiones externas
+# --port $PORT: Railway asigna el puerto dinámicamente via variable de entorno
+# --workers 1: un solo worker — el modelo ML es un singleton en memoria;
+#              múltiples workers cargarían múltiples instancias del modelo (622MB cada una)
+# Sin --reload: solo para desarrollo local
+CMD ["sh", "-c", "uvicorn src.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1"]
