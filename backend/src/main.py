@@ -76,7 +76,7 @@ async def lifespan(app: FastAPI):
     from src.services.storage import get_supabase_client
     client = get_supabase_client()
     client.storage.from_(settings.SUPABASE_BUCKET).list()  # calentamiento
-    get_predictor()
+    #get_predictor()  Comentado temporalmente
     yield
 
 
@@ -112,6 +112,20 @@ app.include_router(auth.router,        prefix="/auth",        tags=["Auth"])
 app.include_router(users.router,       prefix="/users",       tags=["Users"])
 app.include_router(predictions.router, prefix="/predictions", tags=["Predictions"])
 app.include_router(admin.router,       prefix="/admin",       tags=["Admin"])
+
+
+# RAM Usage (temporal)
+@app.get("/debug/memory", tags=["Debug"])
+async def memory_usage():
+    import psutil, os
+    process = psutil.Process(os.getpid())
+    mem = process.memory_info()
+    return {
+        "rss_mb": round(mem.rss / 1024 / 1024, 1),      # RAM física usada por el proceso
+        "vms_mb": round(mem.vms / 1024 / 1024, 1),      # memoria virtual total
+        "available_mb": round(psutil.virtual_memory().available / 1024 / 1024, 1),
+        "total_mb": round(psutil.virtual_memory().total / 1024 / 1024, 1),
+    }
 
 
 # Health
