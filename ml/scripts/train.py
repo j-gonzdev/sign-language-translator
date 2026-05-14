@@ -7,6 +7,17 @@ Salida:     ml/models/asl_model.pkl
 
 Uso:
     python ml/scripts/train.py
+
+Nota sobre hiperparametros:
+    El GridSearchCV original determino que los mejores hiperparametros son:
+        n_estimators=200, max_depth=None, min_samples_leaf=1
+    con accuracy CV de 97.70% y accuracy test de 98.20%.
+
+    Para reducir el tamaño del modelo de 622MB a ~155MB y hacerlo viable
+    en produccion con 512MB de RAM (Railway Starter), se fija n_estimators=50.
+    La perdida de accuracy estimada es ~1% (de 98.20% a ~97.2%).
+    max_depth=None se mantiene para preservar la capacidad del modelo en
+    clases dificiles como M, N y del.
 """
 
 import sys
@@ -17,20 +28,16 @@ import numpy as np
 import pandas as pd
 import joblib
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import GridSearchCV, StratifiedKFold
 from sklearn.metrics import classification_report
 
 # CONFIGURACION
 
 RANDOM_SEED = 42
 
-PARAM_GRID = {
-    'n_estimators': [100, 200],
-    'max_depth': [None, 20],
-    'min_samples_leaf': [1, 2]
-}
-
-CV_FOLDS = 5
+# Hiperparametros fijados tras GridSearchCV previo
+N_ESTIMATORS = 50
+MAX_DEPTH = None
+MIN_SAMPLES_LEAF = 1
 
 # Rutas
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -44,14 +51,15 @@ MODELS_DIR.mkdir(parents=True, exist_ok=True)
 # LOGGING
 
 logging.basicConfig(
-    level = logging.INFO,
+    level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers = [
+    handlers=[
         logging.StreamHandler(sys.stdout),
         logging.FileHandler(ML_DIR / "data" / "processed" / "train.log", encoding="utf-8")
     ]
 )
 log = logging.getLogger(__name__)
+
 
 # PIPELINE PRINCIPAL
 
@@ -59,68 +67,51 @@ def main():
     log.info("=" * 60)
     log.info("Entrenamiento - ASL RANDOM FOREST")
     log.info("=" * 60)
-    
+    log.info(f"Hiperparametros: n_estimators={N_ESTIMATORS}, max_depth={MAX_DEPTH}, min_samples_leaf={MIN_SAMPLES_LEAF}")
+
     # Verificaciones
     if not TRAIN_CSV.exists():
         log.error(f"No se encuentra: {TRAIN_CSV}")
         sys.exit(1)
-    
+
     # Cargar datos
     log.info("Cargando landmarks_train.csv...")
     df = pd.read_csv(TRAIN_CSV)
     log.info(f"Shape: {df.shape}")
-    
+
     x = df.drop(columns=['label']).values
     y = df['label'].values
-    
+
     log.info(f"Features: {x.shape[1]}")
     log.info(f"Clases: {sorted(np.unique(y))}")
     log.info(f"Distribucion:\n{pd.Series(y).value_counts().sort_index().to_string()}")
-    
-    # Modelo base
-    rf = RandomForestClassifier(
+
+    # Entrenar modelo
+    log.info("\nEntrenando Random Forest...")
+    model = RandomForestClassifier(
+        n_estimators=N_ESTIMATORS,
+        max_depth=MAX_DEPTH,
+        min_samples_leaf=MIN_SAMPLES_LEAF,
         class_weight='balanced',
         random_state=RANDOM_SEED,
-        n_jobs=-1
-    )
-    
-    # GridSearchCV
-    
-    cv = StratifiedKFold(n_splits=CV_FOLDS, shuffle=True, random_state=RANDOM_SEED)
-    
-    log.info(f"\nIniciando GridSearchCV...")
-    log.info(f"Grid: {PARAM_GRID}")
-    log.info(f"Folds")
-    log.info(f"Combinaciones: {CV_FOLDS * len(PARAM_GRID['n_estimators']) * len(PARAM_GRID['max_depth']) * len(PARAM_GRID['min_samples_leaf'])} entrenamientos")
-    
-    grid_search = GridSearchCV(
-        estimator=rf,
-        param_grid=PARAM_GRID,
-        cv=cv,
-        scoring='accuracy',
         n_jobs=-1,
-        verbose=2
     )
-    
-    grid_search.fit(x, y)
-    
-    # Resultados
-    log.info(f"\nMejores hiperparametros: {grid_search.best_params_}")
-    log.info(f"Mejor accuracy en CV: {grid_search.best_score_:.4f} ({grid_search.best_score_*100:.2f}%)")
-    
-    # Resultados de todas las combinaciones
-    log.info("\nResultados por combinacion:")
-    cv_results = pd.DataFrame(grid_search.cv_results_)
-    cols = ['param_n_estimators', 'param_max_depth', 'param_min_samples_leaf',
-            'mean_test_score', 'std_test_score', 'rank_test_score']
-    log.info("\n" + cv_results[cols].sort_values('rank_test_score').to_string(index=False))
-    
+    model.fit(x, y)
+
+    # Evaluacion rapida sobre train (referencia, no metrica real)
+    y_pred_train = model.predict(x)
+    train_accuracy = (y_pred_train == y).mean()
+    log.info(f"Accuracy en train: {train_accuracy:.4f} ({train_accuracy*100:.2f}%)")
+    log.info("(Ejecuta evaluate.py sobre el conjunto de test para la metrica real)")
+
     # Guardar modelo
-    joblib.dump(grid_search.best_estimator_, MODEL_PATH)
-    log.info(f"nModelo guardado en: {MODEL_PATH}")
+    joblib.dump(model, MODEL_PATH)
+    size_mb = MODEL_PATH.stat().st_size / 1024 / 1024
+    log.info(f"\nModelo guardado en: {MODEL_PATH} ({size_mb:.1f} MB)")
     log.info("=" * 60)
     log.info("ENTRENAMIENTO COMPLETADO")
     log.info("=" * 60)
-    
+
+
 if __name__ == "__main__":
     main()
