@@ -38,3 +38,5 @@ pydantic[email]
 bcrypt==4.0.1
 
 httpx-ws>=0.9,<1.0
+
+huggingface-hub>=0.23,<1.0
