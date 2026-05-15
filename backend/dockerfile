@@ -67,4 +67,4 @@ EXPOSE 8000
 # --workers 1: un solo worker — el modelo ML es un singleton en memoria;
 #              múltiples workers cargarían múltiples instancias del modelo (622MB cada una)
 # Sin --reload: solo para desarrollo local
-CMD ["sh", "-c", "uvicorn src.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1"]
+CMD ["sh", "-c", "cd /app/backend && alembic upgrade head && cd /app && uvicorn src.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1"]
